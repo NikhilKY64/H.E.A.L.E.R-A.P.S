@@ -2,7 +2,7 @@
  * H.E.A.L.E.R - Arduino Mega Firmware
  * ------------------------------------
  * Controls 4 medicine compartments (servos), ESP32-CAM trigger,
- * and RFID authentication for the H.E.A.L.E.R system.
+ * RFID authentication, and offline self-test push button.
  * 
  * Hardware: Arduino Mega 2560
  * Libraries: Servo, SPI, MFRC522
@@ -15,10 +15,12 @@
 
 // --- Configuration ---
 // Individual Angles for each servo [1, 2, 3, 4, FA]
-// If a door moves the WRONG way, just swap the OPEN and CLOSE numbers for that door!
 // [Door 1, Door 2, Door 3, Door 4, First Aid]
-const int OPEN_ANGLES[]  = {34, 35, 35, 42, 155};
-const int CLOSE_ANGLES[] = {153, 150, 152, 157, 40};
+const int OPEN_ANGLES[]  = {30, 35, 35, 42, 155};
+const int CLOSE_ANGLES[] = {156, 153, 155, 160, 40};
+
+// --- Single Variable to Adjust Hold Time (in milliseconds) ---
+const int HOLD_TIME = 4000; // Duration all doors stay open before starting to close
 
 const int BAUD_RATE = 9600;
 unsigned long lastRFIDCheck = 0;
@@ -30,6 +32,7 @@ const int CAM_TRIGGER_PIN = 22;
 const int RFID_RST_PIN = 5;
 const int RFID_SS_PIN = 53; // Mega SS pin
 const int LED_PIN = 13;
+const int TEST_BUTTON_PIN = 2; // Digital Pin 2 for physical demo button
 
 // --- Global Objects ---
 Servo servos[5];
@@ -37,6 +40,10 @@ MFRC522 mfrc522(RFID_SS_PIN, RFID_RST_PIN);
 
 // String buffer for serial commands
 String inputString = "";
+
+// Helper Function Declarations
+void openAllGates();
+void closeAllGates();
 
 void setup() {
   // 1. Initialize Serial
@@ -59,11 +66,14 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // 5. Initialize RFID (SPI)
+  // 5. Initialize Physical Demo Button
+  pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
+
+  // 6. Initialize RFID (SPI)
   SPI.begin();
   mfrc522.PCD_Init();
 
-  // 6. Signal Readiness
+  // 7. Signal Readiness
   Serial.println("ARDUINO_READY");
   blinkLED(3, 100); // 3 quick blinks on start
 }
@@ -76,6 +86,15 @@ void loop() {
   if (millis() - lastRFIDCheck >= RFID_INTERVAL) {
     checkRFID();
     lastRFIDCheck = millis();
+  }
+
+  // C. Check physical self-test button
+  if (digitalRead(TEST_BUTTON_PIN) == LOW) {
+    delay(50); // Software debounce
+    if (digitalRead(TEST_BUTTON_PIN) == LOW) {
+      runSelfTestSequence();
+      while (digitalRead(TEST_BUTTON_PIN) == LOW); // Wait until button is released
+    }
   }
 }
 
@@ -136,22 +155,10 @@ void processCommand(String cmd) {
   }
   
   else if (cmd == "OPEN_ALL") {
-    for (int i = 0; i < 5; i++) {
-      servos[i].attach(SERVO_PINS[i]);
-      servos[i].write(OPEN_ANGLES[i]);
-      delay(500); 
-      servos[i].detach();
-    }
-    sendResponse("ACK_OPEN_ALL");
+    openAllGates();
   }
   else if (cmd == "CLOSE_ALL") {
-    for (int i = 0; i < 5; i++) {
-      servos[i].attach(SERVO_PINS[i]);
-      servos[i].write(CLOSE_ANGLES[i]);
-      delay(500); 
-      servos[i].detach();
-    }
-    sendResponse("ACK_CLOSE_ALL");
+    closeAllGates();
   }
   
   else if (cmd == "REBOOT") {
@@ -214,6 +221,48 @@ void closeFAServo() {
   servos[4].detach();
   sendResponse("ACK_CLOSE_FA");
   blinkLED(1, 200);
+}
+
+/**
+ * Sequential Open: Gates 1, 2, 3, 4, FA
+ */
+void openAllGates() {
+  for (int i = 0; i < 5; i++) {
+    servos[i].attach(SERVO_PINS[i]);
+    servos[i].write(OPEN_ANGLES[i]);
+    delay(1000); 
+    servos[i].detach();
+  }
+  sendResponse("ACK_OPEN_ALL");
+}
+
+/**
+ * Sequential Close: Gates 1, 2, 3, 4, FA
+ */
+void closeAllGates() {
+  for (int i = 0; i < 5; i++) {
+    servos[i].attach(SERVO_PINS[i]);
+    servos[i].write(CLOSE_ANGLES[i]);
+    delay(1000); 
+    servos[i].detach();
+  }
+  sendResponse("ACK_CLOSE_ALL");
+}
+
+/**
+ * Offline self-sequence:
+ * 1. Opens Gate 1 -> Gate 2 -> Gate 3 -> Gate 4 -> FA
+ * 2. Pauses for HOLD_TIME
+ * 3. Closes Gate 1 -> Gate 2 -> Gate 3 -> Gate 4 -> FA
+ */
+void runSelfTestSequence() {
+  sendResponse("STARTING_SELF_TEST");
+
+  openAllGates();   // Opens 1 through 5 sequentially
+  delay(HOLD_TIME); // Waits for configured hold time
+  closeAllGates();  // Closes 1 through 5 sequentially
+
+  sendResponse("SELF_TEST_COMPLETE");
 }
 
 /**
